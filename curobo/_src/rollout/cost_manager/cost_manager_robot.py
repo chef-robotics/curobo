@@ -16,6 +16,7 @@ import torch
 # CuRobo
 from curobo._src.cost.cost_base import BaseCost
 from curobo._src.cost.cost_cspace_dist import CSpaceDistCost
+from curobo._src.cost.cost_linear_path import LinearPathCost
 from curobo._src.cost.cost_scene_collision import SceneCollisionCost
 from curobo._src.cost.cost_self_collision import SelfCollisionCost
 from curobo._src.cost.cost_tool_pose import ToolPoseCost
@@ -177,6 +178,22 @@ class RobotCostManager:
             config.tool_pose_cfg.set_tool_frames(transition_model.robot_model.tool_frames)
             self.register_cost("tool_pose", ToolPoseCost(config.tool_pose_cfg))
 
+        # Linear tool-space path (soft guiding cost)
+        if config.linear_path_cfg is not None:
+            config.linear_path_cfg.set_tool_frames(transition_model.robot_model.tool_frames)
+            self.register_cost("linear_path", LinearPathCost(config.linear_path_cfg))
+
+        # Linear tool-space path (tolerance-gated feasibility constraint). Same
+        # cost class, registered under a distinct name so it can be updated and
+        # toggled independently of the soft cost.
+        if config.linear_path_constraint_cfg is not None:
+            config.linear_path_constraint_cfg.set_tool_frames(
+                transition_model.robot_model.tool_frames
+            )
+            self.register_cost(
+                "linear_path_constraint", LinearPathCost(config.linear_path_constraint_cfg)
+            )
+
         # Start cspace distance
         if config.start_cspace_dist_cfg is not None:
             config.start_cspace_dist_cfg.initialize_from_transition_model(transition_model)
@@ -236,6 +253,20 @@ class RobotCostManager:
                         goal.idxs_link_pose,
                     )
                     cost_collection.add(cost_value, "tool_pose")
+
+        # Linear tool-space path (soft cost and/or feasibility constraint). Both
+        # share the LinearPathCost class; they are separate registered instances
+        # so a manager may hold either or both.
+        for linear_path_name in ("linear_path", "linear_path_constraint"):
+            if self.has_cost(linear_path_name):
+                linear_path_cost = self.get_cost(linear_path_name)
+                if linear_path_cost.enabled:
+                    with self._stream_context(linear_path_name):
+                        cost_value = linear_path_cost.forward(
+                            state.tool_poses,
+                            goal.link_goal_poses if goal is not None else None,
+                        )
+                        cost_collection.add(cost_value, linear_path_name)
 
         # Cspace bounds/limits
         if self.has_cost("cspace"):
@@ -373,6 +404,31 @@ class RobotCostManager:
                 return
             if tool_pose_cost is not None:
                 tool_pose_cost.update_tool_pose_criteria(tool_pose_criteria)
+        # The soft cost ("linear_path") and the feasibility constraint
+        # ("linear_path_constraint") are distinct registered instances updated
+        # via distinct kwargs. update_params is broadcast to every manager, so a
+        # manager only acts on the kwarg whose component it actually holds.
+        for kwarg_name in ("linear_path", "linear_path_constraint"):
+            if kwarg_name in kwargs and self.has_cost(kwarg_name):
+                linear_path = kwargs[kwarg_name]
+                if not isinstance(linear_path, dict):
+                    log_and_raise(
+                        f"{kwarg_name} must be a dict, got {type(linear_path)}"
+                    )
+                    return
+                linear_path_cost = self.get_cost(kwarg_name)
+                if linear_path_cost is not None:
+                    if linear_path.get("clear", False):
+                        linear_path_cost.clear_linear_path()
+                    else:
+                        linear_path_cost.update_linear_path(
+                            line_start=linear_path["line_start"],
+                            line_end=linear_path["line_end"],
+                            quat_start=linear_path["quat_start"],
+                            quat_goal=linear_path["quat_goal"],
+                            weight=linear_path.get("weight"),
+                            tolerance=linear_path.get("tolerance"),
+                        )
         if "dt" in kwargs:
             self.update_dt(kwargs["dt"])
 

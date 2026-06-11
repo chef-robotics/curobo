@@ -46,6 +46,15 @@ rollout:
     self_collision_cfg:
       weight: 10000.0
 
+    # See metrics_base.yml for more details.
+    linear_path_constraint_cfg:
+      active_at_init: false
+      weight:
+        - 5000.0 # position weight
+        - 0.0 # orientation weight
+      position_tolerance: 0.01 # [m]
+      orientation_tolerance: 0.05 # [rad] (~3 deg)
+
   cost_cfg:
     cspace_cfg:
       activation_distance:
@@ -85,3 +94,13 @@ rollout:
       weight:
       - 1000000.0
       - 100000.0
+
+    # Linear-path cost.
+    # Disabled by default; MotionPlanner must activate it before planning.
+    # Weights are tuned to work in conjunction with associated constraint,
+    # `linear_path_constraint_cfg`.
+    linear_path_cfg:
+      active_at_init: false
+      weight:
+      - 10000000.0 # position weight
+      - 10000.0 # orientation weight

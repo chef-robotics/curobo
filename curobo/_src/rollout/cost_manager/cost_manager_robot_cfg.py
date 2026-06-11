@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Dict, Optional
 # CuRobo
 from curobo._src.cost.cost_cspace_cfg import CSpaceCostCfg
 from curobo._src.cost.cost_cspace_dist_cfg import CSpaceDistCostCfg
+from curobo._src.cost.cost_linear_path_cfg import LinearPathCostCfg
 from curobo._src.cost.cost_scene_collision_cfg import SceneCollisionCostCfg
 from curobo._src.cost.cost_self_collision_cfg import SelfCollisionCostCfg
 from curobo._src.cost.cost_tool_pose_cfg import ToolPoseCostCfg
@@ -61,6 +62,17 @@ class RobotCostManagerCfg:
     #: Tool (end-effector) pose tracking cost configuration. None
     #: disables pose-based objectives.
     tool_pose_cfg: Optional[ToolPoseCostCfg] = None
+    #: Linear tool-space path cost configuration. Guides the tool along a
+    #: straight start->goal segment with slerp-interpolated orientation. None
+    #: disables the linear-path objective.
+    linear_path_cfg: Optional[LinearPathCostCfg] = None
+    #: Linear tool-space path *constraint* configuration. Same cost class as
+    #: :attr:`linear_path_cfg` but registered under ``constraint_cfg`` with a
+    #: non-zero deadband tolerance so it gates feasibility (deviation beyond the
+    #: tolerance makes the trajectory infeasible). None disables the gate. For
+    #: trajopt, also register in ``metrics_base.yml``; align tolerances across
+    #: both YAMLs (matching weights is recommended).
+    linear_path_constraint_cfg: Optional[LinearPathCostCfg] = None
 
     def __post_init__(self):
         from .cost_manager_robot import RobotCostManager
@@ -85,6 +97,8 @@ class RobotCostManagerCfg:
             "start_cspace_dist_cfg": CSpaceDistCostCfg,
             "target_cspace_dist_cfg": CSpaceDistCostCfg,
             "tool_pose_cfg": ToolPoseCostCfg,
+            "linear_path_cfg": LinearPathCostCfg,
+            "linear_path_constraint_cfg": LinearPathCostCfg,
         }
         data = {}
         for k, cfg_class in cost_key_map.items():

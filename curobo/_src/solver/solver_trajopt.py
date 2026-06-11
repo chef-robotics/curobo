@@ -171,6 +171,18 @@ class TrajOptSolver:
     def update_tool_pose_criteria(self, tool_pose_criteria):
         return self.core.update_tool_pose_criteria(tool_pose_criteria)
 
+    def set_linear_path_cost(self, linear_path):
+        return self.core.set_linear_path_cost(linear_path)
+
+    def clear_linear_path_cost(self):
+        return self.core.clear_linear_path_cost()
+
+    def set_linear_path_constraint(self, linear_path):
+        return self.core.set_linear_path_constraint(linear_path)
+
+    def clear_linear_path_constraint(self):
+        return self.core.clear_linear_path_constraint()
+
     def update_link_inertial(self, link_name, mass=None, com=None, inertia=None):
         return self.core.update_link_inertial(link_name, mass, com, inertia)
 
