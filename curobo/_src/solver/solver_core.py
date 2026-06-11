@@ -439,6 +439,48 @@ class SolverCore:
             rollout.update_params_cost_managers(tool_pose_criteria=tool_pose_criteria)
         self.auxiliary_rollout.update_params_cost_managers(tool_pose_criteria=tool_pose_criteria)
 
+    def _broadcast_linear_path(self, **kwargs: Dict[str, torch.Tensor]) -> None:
+        """Forward a linear-path update kwarg to every rollout's cost managers.
+
+        Rollouts whose cost managers do not register the matching component
+        (``linear_path`` for the soft cost, ``linear_path_constraint`` for the
+        feasibility gate) ignore the update.
+        """
+        self.metrics_rollout.update_params_cost_managers(**kwargs)
+        for rollout in self.additional_metrics_rollouts.values():
+            rollout.update_params_cost_managers(**kwargs)
+        for rollout in self.optimizer_rollouts:
+            rollout.update_params_cost_managers(**kwargs)
+        self.auxiliary_rollout.update_params_cost_managers(**kwargs)
+
+    @profiler.record_function("solver_core/set_linear_path_cost")
+    def set_linear_path_cost(self, linear_path: Dict[str, torch.Tensor]):
+        """Activate the soft linear-path cost on all rollouts.
+
+        ``linear_path`` carries segment endpoints; weight/tolerance are restored
+        from each rollout's task YAML when omitted from the dict.
+        """
+        self._broadcast_linear_path(linear_path=linear_path)
+
+    @profiler.record_function("solver_core/clear_linear_path_cost")
+    def clear_linear_path_cost(self):
+        """Disable the soft linear-path cost on all rollouts."""
+        self.set_linear_path_cost({"clear": True})
+
+    @profiler.record_function("solver_core/set_linear_path_constraint")
+    def set_linear_path_constraint(self, linear_path: Dict[str, torch.Tensor]):
+        """Activate the linear-path feasibility constraint on all rollouts.
+
+        ``linear_path`` carries segment endpoints; weight/tolerance are restored
+        from each rollout's task YAML when omitted from the dict.
+        """
+        self._broadcast_linear_path(linear_path_constraint=linear_path)
+
+    @profiler.record_function("solver_core/clear_linear_path_constraint")
+    def clear_linear_path_constraint(self):
+        """Disable the linear-path feasibility constraint on all rollouts."""
+        self.set_linear_path_constraint({"clear": True})
+
     # -----------------------------------------------------------------------
     # Sample configs (collision activation distance passed as arg)
     # -----------------------------------------------------------------------

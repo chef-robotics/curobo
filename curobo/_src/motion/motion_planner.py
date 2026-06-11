@@ -637,3 +637,51 @@ class MotionPlanner:
     def update_tool_pose_criteria(self, tool_pose_criteria: Dict[str, ToolPoseCriteria]):
         self.ik_solver.update_tool_pose_criteria(tool_pose_criteria)
         self.trajopt_solver.update_tool_pose_criteria(tool_pose_criteria)
+
+    @staticmethod
+    def _linear_path_segment(
+        start_position: torch.Tensor,
+        goal_position: torch.Tensor,
+        start_quaternion: torch.Tensor,
+        goal_quaternion: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        return {
+            "line_start": torch.as_tensor(start_position, dtype=torch.float32).reshape(1, 3),
+            "line_end": torch.as_tensor(goal_position, dtype=torch.float32).reshape(1, 3),
+            "quat_start": torch.as_tensor(start_quaternion, dtype=torch.float32).reshape(1, 4),
+            "quat_goal": torch.as_tensor(goal_quaternion, dtype=torch.float32).reshape(1, 4),
+        }
+
+    def set_linear_path(
+        self,
+        start_position: torch.Tensor,
+        goal_position: torch.Tensor,
+        start_quaternion: torch.Tensor,
+        goal_quaternion: torch.Tensor,
+    ) -> None:
+        """Activate the linear-path soft cost and constraint for this query.
+
+        Sets only the per-query segment endpoints on both registered instances.
+        Each instance restores its weight and tolerance from the task YAMLs
+        (``cost_cfg.linear_path_cfg`` and ``constraint_cfg.linear_path_constraint_cfg``
+        in ``trajopt/lbfgs_bspline_trajopt.yml``). The constraint block should
+        also be registered in ``metrics_base.yml`` so feasibility gating applies;
+        keep tolerances aligned between the two files (matching weights is
+        recommended but not required). Use a zero constraint weight in YAML for
+        guidance-only (no feasibility gate).
+        """
+        linear_path = self._linear_path_segment(
+            start_position, goal_position, start_quaternion, goal_quaternion
+        )
+        self.trajopt_solver.set_linear_path_cost(linear_path)
+        self.trajopt_solver.set_linear_path_constraint(linear_path)
+
+    def clear_linear_path(self) -> None:
+        """Disable the linear-path soft cost and constraint for this query.
+
+        Zeroes both live weight buffers and collapses both segments to
+        degenerate (zero-length) lines. The kernels stay registered for
+        CUDA-graph safety; see :class:`~curobo._src.cost.cost_linear_path.LinearPathCost`.
+        """
+        self.trajopt_solver.clear_linear_path_cost()
+        self.trajopt_solver.clear_linear_path_constraint()

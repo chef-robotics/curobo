@@ -18,6 +18,21 @@ rollout:
       activation_distance: [0.0,0.0,0.0,0.0, 0.0] # for position, velocity, acceleration and jerk
       cost_type: STATE
 
+    # Linear-path feasibility gate.
+    # NOT applied by default; MotionPlanner must activate it before planning.
+    # RECOMMEND to keep weights and tolerances in sync with trajopt config.
+    # NOTE: Orientation constraint is disabled by default (weight = 0.0) since
+    # we mostly care about linear-TCP position feasibility; we use the
+    # linear-path orientation cost to guide the TCP orientation, without fully
+    # enforcing it. Be careful enabling the orientation constraint, as it can
+    # increase solve time and significantly reduce success rate.
+    linear_path_constraint_cfg:
+      active_at_init: false
+      weight:
+        - 5000.0 # position weight
+        - 0.0 # orientation weight
+      position_tolerance: 0.01 # [m]
+      orientation_tolerance: 0.05 # [rad] (~3 deg)
 
 
   convergence_cfg:
