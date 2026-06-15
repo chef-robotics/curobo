@@ -28,6 +28,9 @@ from curobo._src.types.pose import Pose
 from curobo._src.types.tool_pose import GoalToolPose, ToolPose
 from curobo._src.util.logging import log_and_raise
 
+# Experimental: skip LBFGS and return IK/graph seed trajectories rolled out + interpolated.
+_SEED_ONLY_TRAJECTORY = True
+
 
 def _axis_string_to_vector(axis: str) -> List[float]:
     if axis == "x":
@@ -277,14 +280,25 @@ class MotionPlanner:
                 finetune_attempts = 3
                 finetune_dt_scale = 0.75
 
-            trajopt_result = self.trajopt_solver.solve_pose(
-                goal_tool_poses, current_state,
-                seed_config=seed_config,
-                seed_traj=seed_traj,
-                use_implicit_goal=True,
-                finetune_attempts=finetune_attempts,
-                finetune_dt_scale=finetune_dt_scale,
-            )
+            if _SEED_ONLY_TRAJECTORY:
+                trajopt_result = self.trajopt_solver.solve_pose_seed_only(
+                    goal_tool_poses,
+                    current_state,
+                    seed_config=seed_config,
+                    seed_traj=seed_traj,
+                    use_implicit_goal=True,
+                    finetune_dt_scale=finetune_dt_scale,
+                )
+            else:
+                trajopt_result = self.trajopt_solver.solve_pose(
+                    goal_tool_poses,
+                    current_state,
+                    seed_config=seed_config,
+                    seed_traj=seed_traj,
+                    use_implicit_goal=True,
+                    finetune_attempts=finetune_attempts,
+                    finetune_dt_scale=finetune_dt_scale,
+                )
             total_time += trajopt_result.total_time
             solve_time += trajopt_result.solve_time
             if torch.count_nonzero(trajopt_result.success) > 0:

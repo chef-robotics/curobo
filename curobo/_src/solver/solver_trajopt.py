@@ -476,6 +476,131 @@ class TrajOptSolver:
         best_trajopt_result.total_time = total_timer.stop()
         return best_trajopt_result
 
+    @profiler.record_function("trajopt_solver/_solve_impl_seed_only")
+    def _solve_impl_seed_only(
+        self,
+        current_state: JointState,
+        solve_state: SolveState,
+        goal_tool_poses: GoalToolPose,
+        num_seeds: int,
+        seed_config=None,
+        seed_traj=None,
+        return_seeds: int = 1,
+        dt=None,
+        use_implicit_goal: bool = False,
+        goal_state: Optional[JointState] = None,
+        finetune_dt_scale: float = 0.55,
+    ) -> TrajOptSolverResult:
+        """Roll out seed trajectories without running the LBFGS optimizer."""
+        total_timer = CudaEventTimer().start()
+        action_seed = self.prepare_trajectory_seeds(
+            solve_state.batch_size,
+            num_seeds,
+            current_state=current_state,
+            seed_config=seed_config,
+            seed_traj=seed_traj,
+        )
+        with profiler.record_function("trajopt_solver/calculate_seed_goal_state"):
+            seed_goal_state = action_seed[..., -1, :].view(-1, self.action_dim)
+            seed_goal_state = seed_goal_state.view(
+                solve_state.batch_size, num_seeds, self.action_dim
+            )
+            seed_goal_state = JointState.from_position(seed_goal_state)
+            if self._seed_dt_buffer is None or self._seed_dt_buffer.shape != (
+                solve_state.batch_size,
+                num_seeds,
+            ):
+                self._seed_dt_buffer = torch.ones(
+                    (solve_state.batch_size, num_seeds),
+                    device=self.device_cfg.device,
+                    dtype=self.device_cfg.dtype,
+                )
+            seed_goal_state.dt = self._seed_dt_buffer
+            if dt is not None:
+                seed_goal_state.dt[:] = dt
+
+            if seed_traj is not None or seed_config is not None:
+                temp_goal_buffer_for_dt, update_reference = self._prepare_goal_buffer(
+                    solve_state,
+                    goal_tool_poses,
+                    current_state,
+                    use_implicit_goal,
+                    seed_goal_state,
+                    goal_state,
+                )
+                self.metrics_rollout.update_params(goal=temp_goal_buffer_for_dt)
+                self.additional_metrics_rollouts["interpolated_rollout"].update_params(
+                    goal=temp_goal_buffer_for_dt
+                )
+                with torch.no_grad():
+                    robot_state = self.metrics_rollout.compute_state_from_action(
+                        action_seed.detach()
+                    )
+                state_seq = robot_state.joint_state
+                calculated_dt = self.compute_trajectory_dt(state_seq, scale_dt=True)
+                calculated_dt = calculated_dt.view(solve_state.batch_size, num_seeds)
+                if dt is None:
+                    dt = calculated_dt
+                    seed_goal_state.dt = dt
+
+        best_dt = seed_goal_state.dt.clone()
+        current_dt_for_buffer = best_dt * finetune_dt_scale
+        current_dt_for_buffer = torch.clamp(
+            current_dt_for_buffer,
+            min=self.config.minimum_trajectory_dt,
+            max=self.config.maximum_trajectory_dt,
+        )
+        seed_goal_state.dt.copy_(current_dt_for_buffer)
+        goal_buffer, update_reference = self._prepare_goal_buffer(
+            solve_state,
+            goal_tool_poses,
+            current_state,
+            use_implicit_goal,
+            seed_goal_state,
+            goal_state,
+        )
+        self._update_rollout_params(goal_buffer)
+
+        opt_result = action_seed
+        with profiler.record_function("trajopt_solver/post_optimization"):
+            optimized_state = self.metrics_rollout.compute_state_from_action(opt_result)
+            optimized_joint_state = optimized_state.joint_state
+            new_dt = self.compute_trajectory_dt(optimized_joint_state, scale_dt=True)
+            new_dt = new_dt.view(solve_state.batch_size, num_seeds)
+            if new_dt.shape != seed_goal_state.dt.shape:
+                log_and_raise(
+                    f"new_dt.shape: {new_dt.shape} != seed_goal_state.dt.shape: "
+                    f"{seed_goal_state.dt.shape}"
+                )
+            self._update_trajectory_dt(new_dt, goal_buffer)
+            metrics_result = self.metrics_rollout.compute_metrics_from_action(opt_result)
+
+        js_optimized = metrics_result.state.joint_state
+        js_optimized.joint_names = self.joint_names
+        js_optimized.knot = metrics_result.actions
+        js_optimized.knot_dt = (
+            metrics_result.state.joint_state.dt
+            * self.auxiliary_rollout.transition_model.interpolation_steps
+        )
+        interpolated_metrics, interpolated_trajectory, last_tstep = (
+            self._interpolate_and_compute_metrics(js_optimized)
+        )
+
+        trajopt_result = self._get_result(
+            opt_result,
+            metrics_result,
+            interpolated_metrics,
+            interpolated_trajectory,
+            last_tstep,
+            num_seeds,
+            num_seeds,
+        )
+        trajopt_result.process_metrics_and_rank_seeds()
+        trajopt_result = self._get_best_result(trajopt_result, return_seeds)
+        trajopt_result.solve_time = 0.0
+        trajopt_result.total_time = total_timer.stop()
+        return trajopt_result
+
     @profiler.record_function("trajopt_solver/_get_best_result")
     @get_torch_jit_decorator(only_valid_for_compile=True, slow_to_compile=True)
     def _get_best_result(
@@ -835,6 +960,101 @@ class TrajOptSolver:
         )
         if needs_pad:
             from curobo._src.solver.solver_ik import _slice_batch_result
+            result = _slice_batch_result(result, actual_batch_size)
+        return result
+
+    @profiler.record_function("trajopt_solver/solve_pose_seed_only")
+    def solve_pose_seed_only(
+        self,
+        goal_tool_poses: GoalToolPose,
+        current_state: JointState,
+        seed_config=None,
+        seed_traj=None,
+        return_seeds: int = 1,
+        num_seeds: Optional[int] = None,
+        dt=None,
+        use_implicit_goal: bool = False,
+        goal_state: Optional[JointState] = None,
+        finetune_dt_scale: float = 0.55,
+    ) -> TrajOptSolverResult:
+        """Return rolled-out seed trajectories without LBFGS optimization."""
+        max_batch = self.config.max_batch_size
+        batch_size = goal_tool_poses.batch_size
+        if num_seeds is None:
+            num_seeds = self.config.num_seeds
+        if return_seeds > num_seeds:
+            log_warn(
+                f"Requested {return_seeds} solutions, increasing optimization seeds "
+                f"from {num_seeds} to {return_seeds}."
+            )
+            num_seeds = return_seeds
+
+        if batch_size > max_batch:
+            log_and_raise(
+                f"solve_pose_seed_only: batch_size={batch_size} exceeds "
+                f"config.max_batch_size={max_batch}."
+            )
+
+        num_goalset = goal_tool_poses.num_goalset
+        if num_goalset > self.config.max_goalset:
+            log_and_raise(
+                f"solve_pose_seed_only: num_goalset={num_goalset} exceeds "
+                f"config.max_goalset={self.config.max_goalset}."
+            )
+
+        actual_batch_size = batch_size
+        needs_pad = batch_size < max_batch
+        if needs_pad:
+            from curobo._src.solver.solver_ik import _pad_batch_inputs
+
+            goal_tool_poses, current_state, seed_config = _pad_batch_inputs(
+                goal_tool_poses, current_state, seed_config, batch_size, max_batch,
+            )
+            if goal_state is not None:
+                pad = max_batch - batch_size
+                goal_state = goal_state.clone()
+                goal_state.position = torch.cat(
+                    [goal_state.position, goal_state.position[:1].expand(pad, -1)], dim=0,
+                )
+            if seed_traj is not None:
+                pad = max_batch - batch_size
+                seed_traj = torch.cat(
+                    [seed_traj, seed_traj[:1].expand(pad, *[-1] * (seed_traj.ndim - 1))], dim=0,
+                )
+        batch_size = max_batch
+
+        if batch_size == 1:
+            solve_mode = SolveMode.SINGLE
+        elif self.config.multi_env:
+            solve_mode = SolveMode.MULTI_ENV
+        else:
+            solve_mode = SolveMode.BATCH
+
+        solve_state = SolveState(
+            solve_type=solve_mode,
+            num_trajopt_seeds=num_seeds,
+            batch_size=batch_size,
+            num_envs=batch_size if self.config.multi_env else 1,
+            num_goalset=num_goalset,
+            tool_frames=goal_tool_poses.tool_frames,
+        )
+
+        result = self._solve_impl_seed_only(
+            current_state=current_state,
+            solve_state=solve_state,
+            goal_tool_poses=goal_tool_poses,
+            num_seeds=num_seeds,
+            seed_config=seed_config,
+            seed_traj=seed_traj,
+            return_seeds=return_seeds,
+            dt=dt,
+            use_implicit_goal=use_implicit_goal,
+            goal_state=goal_state,
+            finetune_dt_scale=finetune_dt_scale,
+        )
+        if needs_pad:
+            from curobo._src.solver.solver_ik import _slice_batch_result
+
             result = _slice_batch_result(result, actual_batch_size)
         return result
 
